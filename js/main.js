@@ -11,7 +11,10 @@
      Helpers
   --------------------------------------------------------- */
   const $ = (sel, ctx) => (ctx || document).querySelector(sel);
-  const $$ = (sel, ctx) => Array.from((ctx || document).querySelectorAll(sel));
+  const $$ = (sel, ctx) => {
+    const root = typeof ctx === "string" ? document.querySelector(ctx) : ctx || document;
+    return root ? Array.from(root.querySelectorAll(sel)) : [];
+  };
   const formatPrice = (p) => (p === 0 ? "Free" : "₹" + p.toLocaleString("en-IN"));
 
   /* ---------------------------------------------------------
@@ -166,23 +169,93 @@
     $$(".btn-save", grid).forEach((b) =>
       b.addEventListener("click", () => {
         const id = Number(b.dataset.id);
-        if (savedItems.has(id)) {
-          savedItems.delete(id);
-          b.classList.remove("saved");
-          b.textContent = "☆";
-          toast("Removed from saved items.");
-        } else {
-          savedItems.add(id);
-          b.classList.add("saved");
-          b.textContent = "★";
-          toast("Saved to your dashboard.");
-        }
+        toggleSaved(id);
+        b.classList.toggle("saved", savedItems.has(id));
+        b.textContent = savedItems.has(id) ? "★" : "☆";
       })
     );
   }
 
+  /* ---------------------------------------------------------
+     Saved items — shared state across cards, modal, and drawer
+  --------------------------------------------------------- */
+  function toggleSaved(id, silent) {
+    const p = PRODUCTS.find((x) => x.id === id);
+    if (savedItems.has(id)) {
+      savedItems.delete(id);
+      if (!silent) toast("Removed from saved items.");
+    } else {
+      savedItems.add(id);
+      if (!silent) toast(p ? `Saved "${p.name}" to your list.` : "Saved to your dashboard.");
+    }
+    updateSavedBadge();
+    if ($("#drawerOverlay").classList.contains("active")) renderDrawer();
+  }
+
+  function updateSavedBadge() {
+    const badge = $("#savedBadge");
+    const count = savedItems.size;
+    badge.textContent = count;
+    badge.hidden = count === 0;
+  }
+
+  function renderDrawer() {
+    const body = $("#drawerBody");
+    $("#drawerCount").textContent = `(${savedItems.size})`;
+    if (!savedItems.size) {
+      body.innerHTML = `<p class="drawer-empty">Nothing saved yet — tap the ☆ on any listing to keep it here.</p>`;
+      return;
+    }
+    const items = PRODUCTS.filter((p) => savedItems.has(p.id));
+    body.innerHTML = items
+      .map(
+        (p) => `
+      <div class="drawer-item" data-id="${p.id}">
+        <div class="drawer-icon">${icon(p.icon)}</div>
+        <div class="drawer-info">
+          <h4>${p.name}</h4>
+          <p>${formatPrice(p.price)}</p>
+        </div>
+        <button class="drawer-remove" data-id="${p.id}" aria-label="Remove">✕</button>
+      </div>`
+      )
+      .join("");
+    $$(".drawer-remove", body).forEach((b) =>
+      b.addEventListener("click", () => {
+        toggleSaved(Number(b.dataset.id), true);
+        renderDrawer();
+        applyFilters();
+      })
+    );
+  }
+
+  function initSavedDrawer() {
+    const overlay = $("#drawerOverlay");
+    $("#savedToggle").addEventListener("click", () => {
+      renderDrawer();
+      overlay.classList.add("active");
+      document.body.style.overflow = "hidden";
+    });
+    const close = () => {
+      overlay.classList.remove("active");
+      document.body.style.overflow = "";
+    };
+    $("#drawerClose").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => {
+      if (e.target.id === "drawerOverlay") close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    });
+    updateSavedBadge();
+  }
+
+  /* ---------------------------------------------------------
+     Filtering + sorting
+  --------------------------------------------------------- */
   function applyFilters() {
     const q = $("#searchInput").value.trim().toLowerCase();
+    const sort = $("#sortSelect") ? $("#sortSelect").value : "featured";
     let list = PRODUCTS.filter((p) => {
       const matchesFilter = activeFilter === "All" || p.tag === activeFilter;
       const matchesQuery =
@@ -192,12 +265,17 @@
         p.desc.toLowerCase().includes(q);
       return matchesFilter && matchesQuery;
     });
+    list = list.slice();
+    if (sort === "price-asc") list.sort((a, b) => a.price - b.price);
+    else if (sort === "price-desc") list.sort((a, b) => b.price - a.price);
+    else if (sort === "popular") list.sort((a, b) => b.interest - a.interest);
     renderProducts(list);
   }
 
   function initMarketplace() {
     renderProducts(PRODUCTS);
     $("#searchInput").addEventListener("input", applyFilters);
+    $("#sortSelect").addEventListener("change", applyFilters);
     $$(".pill", "#filterPills").forEach((pill) =>
       pill.addEventListener("click", () => {
         $$(".pill", "#filterPills").forEach((p) => p.classList.remove("active"));
@@ -245,15 +323,8 @@
       closeModal();
     });
     $("#modalSave").addEventListener("click", (e) => {
-      if (savedItems.has(p.id)) {
-        savedItems.delete(p.id);
-        e.target.textContent = "☆ Save Item";
-        toast("Removed from saved items.");
-      } else {
-        savedItems.add(p.id);
-        e.target.textContent = "★ Saved";
-        toast("Saved to your dashboard.");
-      }
+      toggleSaved(p.id);
+      e.target.textContent = savedItems.has(p.id) ? "★ Saved" : "☆ Save Item";
       applyFilters();
     });
   }
@@ -292,6 +363,43 @@
         </div>
       </div>`
     ).join("");
+
+    initTestimonialCarousel(track);
+  }
+
+  function initTestimonialCarousel(track) {
+    const dotsWrap = $("#testDots");
+    const cards = $$(".test-card", track);
+    if (!cards.length) return;
+
+    dotsWrap.innerHTML = cards.map((_, i) => `<button class="test-dot${i === 0 ? " active" : ""}" data-i="${i}" aria-label="Go to testimonial ${i + 1}"></button>`).join("");
+    const dots = $$(".test-dot", dotsWrap);
+
+    let current = 0;
+    let autoplayTimer;
+
+    function goTo(i) {
+      current = (i + cards.length) % cards.length;
+      const card = cards[current];
+      track.scrollTo({ left: card.offsetLeft - track.offsetLeft, behavior: "smooth" });
+      dots.forEach((d, idx) => d.classList.toggle("active", idx === current));
+    }
+
+    $("#testPrev").addEventListener("click", () => { goTo(current - 1); restartAutoplay(); });
+    $("#testNext").addEventListener("click", () => { goTo(current + 1); restartAutoplay(); });
+    dots.forEach((d) => d.addEventListener("click", () => { goTo(Number(d.dataset.i)); restartAutoplay(); }));
+
+    function startAutoplay() {
+      autoplayTimer = setInterval(() => goTo(current + 1), 5000);
+    }
+    function restartAutoplay() {
+      clearInterval(autoplayTimer);
+      startAutoplay();
+    }
+    const carousel = track.closest(".test-carousel") || track;
+    carousel.addEventListener("mouseenter", () => clearInterval(autoplayTimer));
+    carousel.addEventListener("mouseleave", startAutoplay);
+    startAutoplay();
   }
 
   /* ---------------------------------------------------------
@@ -474,6 +582,112 @@
       toast("Message queued (demo only).");
       contactForm.reset();
     });
+
+    const newsletterForm = $("#newsletterForm");
+    if (newsletterForm) {
+      newsletterForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        $("#newsletterNote").textContent = "Subscribed! (Demo only — no email was actually sent.)";
+        toast("Subscribed to updates (demo only).");
+        newsletterForm.reset();
+      });
+    }
+  }
+
+  /* ---------------------------------------------------------
+     Dark mode toggle — persists via localStorage
+  --------------------------------------------------------- */
+  function initTheme() {
+    const root = document.documentElement;
+    const toggle = $("#themeToggle");
+    const stored = localStorage.getItem("ecycle-theme");
+    const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    if (stored === "dark" || (!stored && prefersDark)) root.setAttribute("data-theme", "dark");
+
+    toggle.addEventListener("click", () => {
+      const isDark = root.getAttribute("data-theme") === "dark";
+      if (isDark) {
+        root.removeAttribute("data-theme");
+        localStorage.setItem("ecycle-theme", "light");
+      } else {
+        root.setAttribute("data-theme", "dark");
+        localStorage.setItem("ecycle-theme", "dark");
+      }
+    });
+  }
+
+  /* ---------------------------------------------------------
+     Scroll progress bar
+  --------------------------------------------------------- */
+  function initScrollProgress() {
+    const bar = $("#scrollProgress");
+    function update() {
+      const h = document.documentElement;
+      const scrollable = h.scrollHeight - h.clientHeight;
+      const pct = scrollable > 0 ? (h.scrollTop / scrollable) * 100 : 0;
+      bar.style.width = pct + "%";
+    }
+    window.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    update();
+  }
+
+  /* ---------------------------------------------------------
+     Custom cursor — desktop, fine-pointer devices only
+  --------------------------------------------------------- */
+  function initCustomCursor() {
+    const supportsFine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
+    if (!supportsFine) return;
+
+    const dot = $("#cursorDot");
+    const ring = $("#cursorRing");
+    document.body.classList.add("has-custom-cursor");
+
+    let mouseX = 0, mouseY = 0;
+    let ringX = 0, ringY = 0;
+    let raf = null;
+
+    function onMove(e) {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+      dot.style.transform = `translate(${mouseX}px, ${mouseY}px) translate(-50%,-50%)`;
+      dot.classList.remove("cursor-hidden");
+      ring.classList.remove("cursor-hidden");
+      if (!raf) raf = requestAnimationFrame(tick);
+    }
+
+    function tick() {
+      ringX += (mouseX - ringX) * 0.18;
+      ringY += (mouseY - ringY) * 0.18;
+      ring.style.transform = `translate(${ringX}px, ${ringY}px) translate(-50%,-50%)`;
+      if (Math.abs(mouseX - ringX) > 0.3 || Math.abs(mouseY - ringY) > 0.3) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        raf = null;
+      }
+    }
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseleave", () => {
+      dot.classList.add("cursor-hidden");
+      ring.classList.add("cursor-hidden");
+    });
+    document.addEventListener("mousedown", () => ring.style.opacity = ".9");
+    document.addEventListener("mouseup", () => ring.style.opacity = "");
+
+    const hoverSelector = "a, button, input, textarea, select, .pill, .cat-card, .product-card, .test-dot, .icon-btn, .step, label";
+    document.addEventListener("mouseover", (e) => {
+      if (e.target.closest(hoverSelector)) {
+        dot.classList.add("cursor-hover");
+        ring.classList.add("cursor-hover");
+      }
+    });
+    document.addEventListener("mouseout", (e) => {
+      if (e.target.closest(hoverSelector)) {
+        dot.classList.remove("cursor-hover");
+        ring.classList.remove("cursor-hover");
+      }
+    });
   }
 
   /* ---------------------------------------------------------
@@ -488,10 +702,14 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    safe(initTheme, "theme");
+    safe(initScrollProgress, "scrollProgress");
+    safe(initCustomCursor, "cursor");
     safe(initNav, "nav");
     safe(renderCategories, "categories");
     safe(initMarketplace, "marketplace");
     safe(initModal, "modal");
+    safe(initSavedDrawer, "savedDrawer");
     safe(renderTestimonials, "testimonials");
     safe(renderFAQ, "faq");
     safe(renderBarChart, "barChart");
